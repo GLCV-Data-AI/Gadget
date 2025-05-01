@@ -1,0 +1,5 @@
+pytube==15.0.0 # Necesario para las excepciones
+pytubefix==8.12.3 # Usado como fix para errores 400 de pytube
+typer==0.9.0
+rich==13.7.0
+moviepy==1.0.3
