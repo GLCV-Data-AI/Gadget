@@ -177,3 +177,6 @@ cython_debug/
 # Carpetas pesadas| 
 audio_to_text/audio
 audio_to_text/text
+
+# Descargas de Youtube Downloader
+youtube_downloader/descargas/
