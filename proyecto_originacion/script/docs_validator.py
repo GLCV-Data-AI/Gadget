@@ -1,147 +1,101 @@
 from google.cloud import storage
-import requests
-import json
 import logging
+from datetime import datetime
 
-class GCSFileValidator:
-    def __init__(self, bucket_name, project_id):
-        self.bucket_name = bucket_name
-        self.storage_client = storage.Client(project=project_id)
-        self.bucket = self.storage_client.bucket(bucket_name)
-        
-    def check_file_integrity(self, file_path):
-        """Verificar integridad del archivo en GCS"""
-        blob = self.bucket.blob(file_path)
-        
-        # Verificar si existe
-        if not blob.exists():
-            print(f"❌ Archivo no existe: {file_path}")
-            return False
-            
-        # Obtener metadatos
-        blob.reload()
-        size = blob.size
-        content_type = blob.content_type
-        
-        print(f"📄 Archivo: {file_path}")
-        print(f"   Tamaño: {size} bytes")
-        print(f"   Tipo: {content_type}")
-        
-        # Verificar tamaño
-        if size == 0:
-            print("   ⚠️ Archivo vacío")
-            return False
-        
-        # Descargar primeros bytes para verificar
-        start_bytes = blob.download_as_bytes(start=0, end=min(1024, size))
-        
-        # Verificar si es PDF
-        if start_bytes.startswith(b'%PDF'):
-            print("   ✅ Es un archivo PDF válido")
-            return True
-        
-        # Verificar si es HTML (error)
-        if start_bytes.startswith(b'<!DOCTYPE') or start_bytes.startswith(b'<html'):
-            print("   ❌ Es HTML (probablemente una página de error)")
-            # Intentar leer el contenido del error
-            try:
-                error_content = blob.download_as_text()
-                print(f"   Contenido del error: {error_content[:200]}...")
-            except:
-                pass
-            return False
-        
-        # Verificar si es JSON (error)
-        try:
-            error_json = json.loads(start_bytes)
-            print(f"   ❌ Es JSON de error: {error_json}")
-            return False
-        except:
-            pass
-            
-        print("   ⚠️ Formato desconocido")
-        return False
-    
-    def validate_all_pdfs(self, prefix="inventario_documents/"):
-        """Validar todos los PDFs en una carpeta"""
-        blobs = self.bucket.list_blobs(prefix=prefix)
-        
-        total = 0
-        valid = 0
-        invalid = 0
-        
-        for blob in blobs:
-            if blob.name.endswith('.pdf'):
-                total += 1
-                if self.check_file_integrity(blob.name):
-                    valid += 1
-                else:
-                    invalid += 1
-                print("-" * 50)
-        
-        print(f"\nResumen:")
-        print(f"Total archivos PDF: {total}")
-        print(f"Válidos: {valid}")
-        print(f"Inválidos: {invalid}")
-        
-        return valid, invalid
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Función mejorada para descargar con validación
-def download_with_validation(url, gcs_path, bucket, max_retries=3):
-    """Descargar archivo con validación y reintentos"""
+def fix_all_pdf_content_types(project_id, bucket_name):
+    """Corregir content-type de TODOS los PDFs en el bucket"""
     
-    for attempt in range(max_retries):
-        try:
-            # Descargar archivo
-            response = requests.get(url, timeout=60, stream=True)
-            
-            # Verificar respuesta
-            if response.status_code == 401:
-                logging.error(f"❌ URL expirada (401): {url}")
-                return False, "URL expirada"
-            
-            response.raise_for_status()
-            
-            # Verificar content-type
-            content_type = response.headers.get('content-type', '')
-            if 'application/pdf' not in content_type.lower():
-                logging.warning(f"⚠️ Content-type no es PDF: {content_type}")
-            
-            # Descargar contenido
-            content = response.content
-            
-            # Verificar que es PDF
-            if not content.startswith(b'%PDF'):
-                logging.error(f"❌ El contenido no es PDF válido")
-                return False, "No es PDF"
-            
-            # Subir a GCS
-            blob = bucket.blob(gcs_path)
-            blob.upload_from_string(
-                content,
-                content_type='application/pdf'
-            )
-            
-            logging.info(f"✅ Archivo subido correctamente: {gcs_path}")
-            return True, "OK"
-            
-        except requests.exceptions.Timeout:
-            logging.error(f"⏱️ Timeout en intento {attempt + 1}")
-            if attempt == max_retries - 1:
-                return False, "Timeout"
-        except Exception as e:
-            logging.error(f"❌ Error en intento {attempt + 1}: {e}")
-            if attempt == max_retries - 1:
-                return False, str(e)
+    storage_client = storage.Client(project=project_id)
+    bucket = storage_client.bucket(bucket_name)
     
-    return False, "Máximo de reintentos alcanzado"
+    fixed_count = 0
+    total_pdfs = 0
+    already_correct = 0
+    
+    logger.info(f"Iniciando corrección de Content-Type en bucket: {bucket_name}")
+    start_time = datetime.now()
+    
+    # Iterar sobre TODOS los archivos
+    for blob in bucket.list_blobs():
+        if blob.name.endswith('.pdf'):
+            total_pdfs += 1
+            
+            # Recargar metadata
+            blob.reload()
+            
+            # Verificar content-type actual
+            current_type = blob.content_type
+            
+            if current_type != 'application/pdf':
+                logger.info(f"Corrigiendo: {blob.name} (tipo actual: {current_type})")
+                
+                # Actualizar content-type
+                blob.content_type = 'application/pdf'
+                blob.patch()
+                
+                fixed_count += 1
+                
+                # Log cada 100 archivos corregidos
+                if fixed_count % 100 == 0:
+                    logger.info(f"Progreso: {fixed_count} archivos corregidos...")
+            else:
+                already_correct += 1
+                
+            # Log cada 500 archivos procesados
+            if total_pdfs % 500 == 0:
+                logger.info(f"Procesados: {total_pdfs} archivos PDF...")
+    
+    end_time = datetime.now()
+    duration = end_time - start_time
+    
+    logger.info(f"\n{'='*50}")
+    logger.info(f"RESUMEN DE CORRECCIÓN")
+    logger.info(f"{'='*50}")
+    logger.info(f"Total PDFs procesados: {total_pdfs}")
+    logger.info(f"Archivos corregidos: {fixed_count}")
+    logger.info(f"Ya correctos: {already_correct}")
+    logger.info(f"Tiempo total: {duration}")
+    logger.info(f"{'='*50}")
+    
+    return fixed_count, total_pdfs
 
-# Uso
+def verify_random_pdfs(project_id, bucket_name, sample_size=5):
+    """Verificar algunos PDFs aleatorios después de la corrección"""
+    
+    storage_client = storage.Client(project=project_id)
+    bucket = storage_client.bucket(bucket_name)
+    
+    logger.info(f"\nVerificando {sample_size} archivos PDF aleatorios...")
+    
+    count = 0
+    for blob in bucket.list_blobs():
+        if blob.name.endswith('.pdf') and count < sample_size:
+            blob.reload()
+            logger.info(f"Archivo: {blob.name}")
+            logger.info(f"  Content-Type: {blob.content_type}")
+            logger.info(f"  Tamaño: {blob.size:,} bytes")
+            count += 1
+            
+            if blob.content_type != 'application/pdf':
+                logger.warning(f"  ⚠️ TODAVÍA INCORRECTO!")
+
+# Script principal
 if __name__ == "__main__":
-    # Configuración
     PROJECT_ID = "proyecto-originacion"
     BUCKET_NAME = "inventario_documents"
     
-    # Validar archivos existentes
-    validator = GCSFileValidator(BUCKET_NAME, PROJECT_ID)
-    validator.validate_all_pdfs()
+    # Corregir todos los PDFs
+    fixed, total = fix_all_pdf_content_types(PROJECT_ID, BUCKET_NAME)
+    
+    # Si se corrigieron archivos, verificar algunos
+    if fixed > 0:
+        verify_random_pdfs(PROJECT_ID, BUCKET_NAME)
+    
+    logger.info("\n✅ Proceso completado. Ahora deberías poder ver los PDFs en el navegador.")
